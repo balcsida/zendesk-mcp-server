@@ -68,6 +68,13 @@ class ZendeskClient:
         # For direct API calls
         self.subdomain = subdomain
         self.base_url = f"https://{subdomain}.zendesk.com/api/v2"
+        # Only Zendesk-controlled attachment hosts may be fetched.
+        self._trusted_attachment_hosts = {
+            f"{subdomain}.zendesk.com".lower(),
+        }
+        self._trusted_attachment_host_suffixes = (
+            ".zdusercontent.com",
+        )
         # Retained for backwards compatibility. Both are None under OAuth, where
         # there is no email/token pair.
         self.email = email
@@ -185,6 +192,8 @@ class ZendeskClient:
         Fetch an image attachment and return base64-encoded data.
 
         Security measures applied:
+        - HTTPS only, and only the account's own subdomain or Zendesk's CDN
+          (*.zdusercontent.com); credentials are sent to the former only.
         - Allowlist of safe image MIME types (no SVG or arbitrary binary).
         - Magic byte validation so the file header must match the declared type.
         - 10 MB size cap to prevent image bombs and excessive token usage.
@@ -196,11 +205,28 @@ class ZendeskClient:
         is not reapplied by requests on redirect, so this still holds.
         """
         try:
-            response = self.session.get(
-                content_url,
-                timeout=30,
-                stream=True,
+            parsed_url = urllib.parse.urlparse(content_url)
+            if parsed_url.scheme.lower() != 'https':
+                raise ValueError("Attachment URL must use HTTPS.")
+
+            hostname = (parsed_url.hostname or '').lower()
+            if not hostname:
+                raise ValueError("Attachment URL must include a valid hostname.")
+
+            is_trusted_host = (
+                hostname in self._trusted_attachment_hosts
+                or any(hostname.endswith(suffix) for suffix in self._trusted_attachment_host_suffixes)
             )
+            if not is_trusted_host:
+                raise ValueError(
+                    "Attachment host is not trusted. Only Zendesk-hosted attachment URLs are allowed."
+                )
+
+            # Only send Zendesk credentials to the account subdomain. CDN hosts don't need them.
+            if hostname in self._trusted_attachment_hosts:
+                response = self.session.get(content_url, timeout=30, stream=True)
+            else:
+                response = _requests.get(content_url, timeout=30, stream=True)
             response.raise_for_status()
 
             content_type = response.headers.get('Content-Type', '').split(';')[0].strip().lower()
