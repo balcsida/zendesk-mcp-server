@@ -1,6 +1,5 @@
 from typing import Dict, Any, List
 import json
-import urllib.request
 import urllib.parse
 import base64
 import logging
@@ -11,22 +10,37 @@ logger = logging.getLogger("zendesk-mcp-server")
 
 class ZendeskClient:
     def __init__(self, subdomain: str, email: str = None, token: str = None,
-                 session_cookie: str = None):
+                 session_cookie: str = None, oauth_access_token: str = None):
         """
         Initialize the Zendesk client.
 
-        Supports two auth modes:
-        - Token auth: requires email + token (uses zenpy + Basic auth)
-        - Cookie auth: requires session_cookie (uses direct HTTP with browser session)
+        Supports three auth modes (checked in order):
+        - OAuth token: requires oauth_access_token (Bearer token from mobile OAuth flow)
+        - API token: requires email + token (Basic auth with email/token:key)
+        - Cookie auth: requires session_cookie (browser session cookie)
         """
         self.subdomain = subdomain
         self.base_url = f"https://{subdomain}.zendesk.com/api/v2"
-        self.email = email
-        self.token = token
-        self.session_cookie = session_cookie
-        self._use_cookies = bool(session_cookie) and not (email and token)
 
-        if self._use_cookies:
+        if oauth_access_token:
+            logger.info("Using OAuth Bearer token authentication")
+            self._session = _requests.Session()
+            self._session.headers.update({
+                'Authorization': f'Bearer {oauth_access_token}',
+                'Content-Type': 'application/json',
+            })
+            self.auth_header = f'Bearer {oauth_access_token}'
+        elif email and token:
+            logger.info("Using API token authentication")
+            credentials = f"{email}/token:{token}"
+            encoded_credentials = base64.b64encode(credentials.encode()).decode('ascii')
+            self.auth_header = f"Basic {encoded_credentials}"
+            self._session = _requests.Session()
+            self._session.headers.update({
+                'Authorization': self.auth_header,
+                'Content-Type': 'application/json',
+            })
+        elif session_cookie:
             logger.info("Using cookie-based authentication")
             self._session = _requests.Session()
             self._session.cookies.set(
@@ -36,64 +50,31 @@ class ZendeskClient:
             self._session.headers.update({
                 'Content-Type': 'application/json',
             })
-            self.client = None
             self.auth_header = None
         else:
-            logger.info("Using token-based authentication")
-            from zenpy import Zenpy
-            self.client = Zenpy(
-                subdomain=subdomain,
-                email=email,
-                token=token
+            raise ValueError(
+                "No authentication configured. Provide one of: "
+                "oauth_access_token, email+token, or session_cookie. "
+                "Run 'zendesk-auth' to authenticate via OAuth."
             )
-            credentials = f"{email}/token:{token}"
-            encoded_credentials = base64.b64encode(credentials.encode()).decode('ascii')
-            self.auth_header = f"Basic {encoded_credentials}"
-            self._session = None
 
     def _api_get(self, path: str) -> Dict[str, Any]:
         """Make a GET request to the Zendesk API."""
-        url = f"{self.base_url}/{path}"
-        if self._use_cookies:
-            resp = self._session.get(url, timeout=30)
-            resp.raise_for_status()
-            return resp.json()
-        else:
-            req = urllib.request.Request(url)
-            req.add_header('Authorization', self.auth_header)
-            req.add_header('Content-Type', 'application/json')
-            with urllib.request.urlopen(req) as response:
-                return json.loads(response.read().decode())
+        resp = self._session.get(f"{self.base_url}/{path}", timeout=30)
+        resp.raise_for_status()
+        return resp.json()
 
     def _api_put(self, path: str, data: Dict[str, Any]) -> Dict[str, Any]:
         """Make a PUT request to the Zendesk API."""
-        url = f"{self.base_url}/{path}"
-        if self._use_cookies:
-            resp = self._session.put(url, json=data, timeout=30)
-            resp.raise_for_status()
-            return resp.json()
-        else:
-            body = json.dumps(data).encode()
-            req = urllib.request.Request(url, data=body, method='PUT')
-            req.add_header('Authorization', self.auth_header)
-            req.add_header('Content-Type', 'application/json')
-            with urllib.request.urlopen(req) as response:
-                return json.loads(response.read().decode())
+        resp = self._session.put(f"{self.base_url}/{path}", json=data, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
 
     def _api_post(self, path: str, data: Dict[str, Any]) -> Dict[str, Any]:
         """Make a POST request to the Zendesk API."""
-        url = f"{self.base_url}/{path}"
-        if self._use_cookies:
-            resp = self._session.post(url, json=data, timeout=30)
-            resp.raise_for_status()
-            return resp.json()
-        else:
-            body = json.dumps(data).encode()
-            req = urllib.request.Request(url, data=body, method='POST')
-            req.add_header('Authorization', self.auth_header)
-            req.add_header('Content-Type', 'application/json')
-            with urllib.request.urlopen(req) as response:
-                return json.loads(response.read().decode())
+        resp = self._session.post(f"{self.base_url}/{path}", json=data, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
 
     def get_ticket(self, ticket_id: int) -> Dict[str, Any]:
         """
@@ -175,19 +156,11 @@ class ZendeskClient:
         which is required — the CDN returns 403 if it receives an auth header.
         """
         try:
-            if self._use_cookies:
-                response = self._session.get(
-                    content_url,
-                    timeout=30,
-                    stream=True,
-                )
-            else:
-                response = _requests.get(
-                    content_url,
-                    headers={'Authorization': self.auth_header},
-                    timeout=30,
-                    stream=True,
-                )
+            response = self._session.get(
+                content_url,
+                timeout=30,
+                stream=True,
+            )
             response.raise_for_status()
 
             content_type = response.headers.get('Content-Type', '').split(';')[0].strip().lower()
@@ -310,30 +283,16 @@ class ZendeskClient:
         """
         try:
             sections_url = f"https://{self.subdomain}.zendesk.com/api/v2/help_center/sections.json"
-            if self._use_cookies:
-                resp = self._session.get(sections_url, timeout=30)
-                resp.raise_for_status()
-                sections_data = resp.json()
-            else:
-                req = urllib.request.Request(sections_url)
-                req.add_header('Authorization', self.auth_header)
-                req.add_header('Content-Type', 'application/json')
-                with urllib.request.urlopen(req) as response:
-                    sections_data = json.loads(response.read().decode())
+            resp = self._session.get(sections_url, timeout=30)
+            resp.raise_for_status()
+            sections_data = resp.json()
 
             kb = {}
             for section in sections_data.get('sections', []):
                 articles_url = f"https://{self.subdomain}.zendesk.com/api/v2/help_center/sections/{section['id']}/articles.json"
-                if self._use_cookies:
-                    resp = self._session.get(articles_url, timeout=30)
-                    resp.raise_for_status()
-                    articles_data = resp.json()
-                else:
-                    req = urllib.request.Request(articles_url)
-                    req.add_header('Authorization', self.auth_header)
-                    req.add_header('Content-Type', 'application/json')
-                    with urllib.request.urlopen(req) as response:
-                        articles_data = json.loads(response.read().decode())
+                resp = self._session.get(articles_url, timeout=30)
+                resp.raise_for_status()
+                articles_data = resp.json()
 
                 kb[section.get('name', '')] = {
                     'section_id': section['id'],
