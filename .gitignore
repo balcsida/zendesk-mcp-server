@@ -15,6 +15,7 @@ wheels/
 .env
 .env.prod
 .env.dev
+.zendesk_token
 
 # Zendesk OAuth tokens. The default store lives in $XDG_CONFIG_HOME/zendesk-mcp/,
 # outside the repo; these patterns catch a ZENDESK_TOKEN_FILE pointed in here.
