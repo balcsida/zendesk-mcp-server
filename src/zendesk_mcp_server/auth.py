@@ -71,3 +71,40 @@ class ApiTokenAuthProvider(_HeaderAuthProvider):
 
     def auth_header(self) -> str:
         return self._header
+
+
+class SessionCookieAuthProvider(AuthBase):
+    """
+    Authenticates with the session cookie of a browser signed in to Zendesk.
+
+    The cookie is set on each request rather than kept in the session's cookie
+    jar. requests rebuilds the Cookie header from the jar when it follows a
+    redirect, so the cookie is never forwarded to the attachment CDN.
+    """
+
+    def __init__(self, session_cookie: str):
+        self._cookie = f"_zendesk_session={session_cookie}"
+
+    def auth_header(self) -> None:
+        # Cookie authentication sends no Authorization header.
+        return None
+
+    def __call__(self, request):
+        cookies = request.headers.get("Cookie")
+        request.headers["Cookie"] = f"{cookies}; {self._cookie}" if cookies else self._cookie
+        return request
+
+
+class BearerTokenAuthProvider(_HeaderAuthProvider):
+    """
+    A fixed OAuth access token, such as the one ``zendesk-mobile-auth`` saves.
+
+    There is no refresh token, so an expired token is replaced by signing in
+    again rather than renewed.
+    """
+
+    def __init__(self, access_token: str):
+        self._header = f"Bearer {access_token}"
+
+    def auth_header(self) -> str:
+        return self._header

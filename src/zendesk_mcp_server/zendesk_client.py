@@ -1,6 +1,4 @@
 from typing import Dict, Any, List
-import json
-import urllib.request
 import urllib.parse
 import base64
 import requests as _requests
@@ -99,6 +97,12 @@ class ZendeskClient:
         rotated OAuth token is picked up.
         """
         return self.auth.auth_header()
+
+    def _api_get(self, path: str) -> Dict[str, Any]:
+        """Make a GET request to the Zendesk API."""
+        resp = self.session.get(f"{self.base_url}/{path}", timeout=30)
+        resp.raise_for_status()
+        return resp.json()
 
     def get_ticket(self, ticket_id: int) -> Dict[str, Any]:
         """
@@ -263,25 +267,13 @@ class ZendeskClient:
             # Cap at reasonable limit
             per_page = min(per_page, 100)
 
-            # Build URL with parameters for offset pagination
-            params = {
+            params = urllib.parse.urlencode({
                 'page': str(page),
                 'per_page': str(per_page),
                 'sort_by': sort_by,
                 'sort_order': sort_order
-            }
-            query_string = urllib.parse.urlencode(params)
-            url = f"{self.base_url}/tickets.json?{query_string}"
-
-            # Create request with auth header
-            req = urllib.request.Request(url)
-            req.add_header('Authorization', self.auth_header)
-            req.add_header('Content-Type', 'application/json')
-
-            # Make the API request
-            with urllib.request.urlopen(req) as response:
-                data = json.loads(response.read().decode())
-
+            })
+            data = self._api_get(f"tickets.json?{params}")
             tickets_data = data.get('tickets', [])
 
             # Process tickets to return only essential fields
@@ -310,9 +302,6 @@ class ZendeskClient:
                 'next_page': page + 1 if data.get('next_page') else None,
                 'previous_page': page - 1 if data.get('previous_page') and page > 1 else None
             }
-        except urllib.error.HTTPError as e:
-            error_body = e.read().decode() if e.fp else "No response body"
-            raise Exception(f"Failed to get latest tickets: HTTP {e.code} - {e.reason}. {error_body}")
         except Exception as e:
             raise Exception(f"Failed to get latest tickets: {str(e)}")
 
