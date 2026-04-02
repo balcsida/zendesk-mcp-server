@@ -217,6 +217,59 @@ def _find_free_port() -> int:
         return s.getsockname()[1]
 
 
+def _open_in_private_window(url: str) -> bool:
+    """
+    Open a URL in a private/incognito browser window.
+
+    This prevents the mobile OAuth flow from polluting the user's normal
+    Zendesk browser session with mobile-specific cookies.
+    """
+    try:
+        if sys.platform == "darwin":
+            # Try common browsers in private mode
+            for args in [
+                # Edge (InPrivate)
+                ["open", "-na", "Microsoft Edge", "--args", "--inprivate", url],
+                # Chrome (Incognito)
+                ["open", "-na", "Google Chrome", "--args", "--incognito", url],
+                # Safari (no CLI flag for private, skip)
+                # Firefox
+                ["open", "-na", "Firefox", "--args", "--private-window", url],
+            ]:
+                try:
+                    subprocess.run(args, check=True, capture_output=True, timeout=5)
+                    logger.info(f"Opened private window via: {args[3]}")
+                    return True
+                except (subprocess.CalledProcessError, FileNotFoundError):
+                    continue
+        elif sys.platform == "linux":
+            for args in [
+                ["xdg-open", url],  # Fallback; can't force private easily
+                ["google-chrome", "--incognito", url],
+                ["firefox", "--private-window", url],
+                ["microsoft-edge", "--inprivate", url],
+            ]:
+                try:
+                    subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    return True
+                except FileNotFoundError:
+                    continue
+        elif sys.platform == "win32":
+            for args in [
+                ["cmd", "/c", "start", "msedge", "--inprivate", url],
+                ["cmd", "/c", "start", "chrome", "--incognito", url],
+                ["cmd", "/c", "start", "firefox", "--private-window", url],
+            ]:
+                try:
+                    subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    return True
+                except FileNotFoundError:
+                    continue
+    except Exception as e:
+        logger.warning(f"Failed to open private window: {e}")
+    return False
+
+
 def _parse_oauth_callback(url: str, subdomain: str) -> dict | None:
     """Parse the OAuth callback URL to extract token data."""
     if not url:
@@ -529,15 +582,19 @@ def auth_via_browser(subdomain: str, timeout: int = 300) -> dict:
 
     try:
         if handler_registered:
-            # Handler registered — open the auth URL directly.
-            # The OS will route zendesk-support:// back to our handler.
-            logger.info("URL scheme handler registered. Opening Zendesk login directly.")
-            webbrowser.open(full_auth_url)
+            # Handler registered — open the auth URL directly in a private window.
+            # Using private/incognito prevents the mobile OAuth cookies from
+            # polluting the user's normal Zendesk browser session.
+            logger.info("URL scheme handler registered. Opening Zendesk login in private window.")
+            if not _open_in_private_window(full_auth_url):
+                logger.info("Private window failed, falling back to default browser.")
+                webbrowser.open(full_auth_url)
         else:
             # No handler — open our local page with paste instructions
             local_url = f"http://127.0.0.1:{port}/auth"
             logger.info(f"Opening browser for authentication: {local_url}")
-            webbrowser.open(local_url)
+            if not _open_in_private_window(local_url):
+                webbrowser.open(local_url)
 
         server_thread.join(timeout=timeout)
         server.server_close()
