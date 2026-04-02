@@ -30,32 +30,56 @@ _zendesk_client: ZendeskClient | None = None
 
 def _init_client() -> ZendeskClient:
     """
-    Pick the auth method from the environment.
+    Initialize the Zendesk client with the best available auth method.
 
-    A mobile OAuth token (ZENDESK_OAUTH_TOKEN or the .zendesk_token file) wins
-    over an API token, which wins over a session cookie. ZENDESK_CLIENT_ID
-    selects OAuth with PKCE instead.
+    Priority:
+    1. ZENDESK_CLIENT_ID: OAuth with PKCE, authorized once with 'zendesk-auth'
+    2. Env var ZENDESK_OAUTH_TOKEN, ZENDESK_API_KEY or ZENDESK_SESSION_COOKIE (explicit config)
+    3. Saved OAuth token from .zendesk_token file
+    4. Browser-based OAuth flow (opens browser for login)
     """
-    from zendesk_mcp_server.mobile_auth import load_token
+    from zendesk_mcp_server.mobile_auth import ensure_auth, load_token
 
     if os.getenv("ZENDESK_CLIENT_ID"):
         return build_client()
 
     subdomain = os.getenv("ZENDESK_SUBDOMAIN")
+    email = os.getenv("ZENDESK_EMAIL")
+    api_key = os.getenv("ZENDESK_API_KEY")
     oauth_token = os.getenv("ZENDESK_OAUTH_TOKEN")
-    if not oauth_token:
+    session_cookie = os.getenv("ZENDESK_SESSION_COOKIE")
+
+    # If explicit credentials are set, use them directly
+    if oauth_token or (email and api_key) or session_cookie:
+        if not oauth_token:
+            token_data = load_token()
+            if token_data:
+                oauth_token = token_data.get("access_token")
+                subdomain = subdomain or token_data.get("subdomain")
+        if oauth_token:
+            return ZendeskClient(subdomain=subdomain, auth=BearerTokenAuthProvider(oauth_token))
+        if email and api_key:
+            return build_client()
+        return ZendeskClient(subdomain=subdomain, auth=SessionCookieAuthProvider(session_cookie))
+
+    # No explicit credentials - try token file, then browser auth
+    if not subdomain:
+        # Check if token file has a subdomain
         token_data = load_token()
         if token_data:
-            oauth_token = token_data.get("access_token")
-            subdomain = subdomain or token_data.get("subdomain")
-            logger.info("Loaded OAuth token from token file")
-    if oauth_token:
-        return ZendeskClient(subdomain=subdomain, auth=BearerTokenAuthProvider(oauth_token))
+            subdomain = token_data.get("subdomain")
 
-    session_cookie = os.getenv("ZENDESK_SESSION_COOKIE")
-    if session_cookie and not (os.getenv("ZENDESK_EMAIL") and os.getenv("ZENDESK_API_KEY")):
-        return ZendeskClient(subdomain=subdomain, auth=SessionCookieAuthProvider(session_cookie))
-    return build_client()
+    if not subdomain:
+        raise ValueError(
+            "ZENDESK_SUBDOMAIN is required. Set it in .env or run 'zendesk-mobile-auth'."
+        )
+
+    # ensure_auth will check existing token, verify it, or open browser
+    token_data = ensure_auth(subdomain)
+    return ZendeskClient(
+        subdomain=subdomain,
+        auth=BearerTokenAuthProvider(token_data["access_token"]),
+    )
 
 
 def get_zendesk_client() -> ZendeskClient:
@@ -464,6 +488,13 @@ async def handle_read_resource(uri: AnyUrl) -> str:
 
 
 async def main():
+    # Authenticate before serving, so a browser login (if one is needed)
+    # happens at startup. A failure is logged and left for the tools to report.
+    try:
+        get_zendesk_client()
+    except Exception as e:
+        logger.error(f"Zendesk authentication failed: {e}")
+
     # Run the server using stdin/stdout streams
     async with stdio_server() as (read_stream, write_stream):
         await server.run(
