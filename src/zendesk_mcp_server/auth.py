@@ -13,8 +13,11 @@ import json
 import logging
 import os
 import platform
+import shutil
 import socket
+import subprocess
 import sys
+import tempfile
 import threading
 import uuid
 import webbrowser
@@ -244,12 +247,204 @@ def _build_auth_url(auth_url: str) -> str:
     return f"{auth_url}?{urlencode({'client_id': CLIENT_ID, 'device[name]': device_name, 'device[identifier]': device_id})}"
 
 
+class _UrlSchemeHandler:
+    """
+    Registers a temporary OS-level URL scheme handler for zendesk-support://.
+
+    When the browser follows the OAuth redirect to zendesk-support://...,
+    the OS routes it to our handler, which forwards the URL to our local
+    HTTP server. Fully automatic — no manual copy/paste.
+
+    Supports macOS, Linux (via xdg-mime), and Windows (via registry).
+    """
+
+    SCHEME = "zendesk-support"
+
+    def __init__(self, callback_port: int):
+        self.callback_port = callback_port
+        self._cleanup_actions: list = []
+
+    def register(self) -> bool:
+        """Create and register the handler. Returns True on success."""
+        try:
+            if sys.platform == "darwin":
+                return self._register_macos()
+            elif sys.platform == "linux":
+                return self._register_linux()
+            elif sys.platform == "win32":
+                return self._register_windows()
+            return False
+        except Exception as e:
+            logger.warning(f"Could not register URL scheme handler: {e}")
+            self.cleanup()
+            return False
+
+    def cleanup(self):
+        """Undo all registrations and remove temp files."""
+        for action in reversed(self._cleanup_actions):
+            try:
+                action()
+            except Exception:
+                pass
+        self._cleanup_actions.clear()
+
+    # --- macOS ---
+
+    def _register_macos(self) -> bool:
+        import plistlib
+        lsregister = (
+            "/System/Library/Frameworks/CoreServices.framework"
+            "/Frameworks/LaunchServices.framework/Support/lsregister"
+        )
+        # Must be in ~/Applications for Launch Services to find it
+        apps_dir = os.path.expanduser("~/Applications")
+        os.makedirs(apps_dir, exist_ok=True)
+        app_dir = os.path.join(apps_dir, "ZendeskMCPAuth.app")
+
+        # Clean up any previous handler first
+        shutil.rmtree(app_dir, ignore_errors=True)
+
+        # Compile an AppleScript that handles the URL scheme via Apple Events.
+        # `on open location` is how macOS delivers custom-scheme URLs to apps.
+        # Write to temp file to avoid shell escaping issues with -e flag.
+        script_file = os.path.join(tempfile.gettempdir(), "zendesk_auth.applescript")
+        with open(script_file, "w") as f:
+            f.write(
+                'on open location theURL\n'
+                '    do shell script "/usr/bin/curl -s -G '
+                '--data-urlencode url=" & quoted form of theURL '
+                f'& " \'http://127.0.0.1:{self.callback_port}/callback\''
+                ' > /dev/null 2>&1 &"\n'
+                'end open location\n'
+            )
+        try:
+            subprocess.run(
+                ["osacompile", "-o", app_dir, script_file],
+                check=True, capture_output=True,
+            )
+        finally:
+            os.unlink(script_file)
+
+        # Patch Info.plist to register the URL scheme
+        plist_path = os.path.join(app_dir, "Contents", "Info.plist")
+        with open(plist_path, "rb") as f:
+            info_plist = plistlib.load(f)
+
+        info_plist["CFBundleIdentifier"] = "com.zendesk-mcp-server.auth"
+        info_plist["CFBundleURLTypes"] = [
+            {
+                "CFBundleURLName": "Zendesk Support OAuth",
+                "CFBundleURLSchemes": [self.SCHEME],
+            }
+        ]
+        with open(plist_path, "wb") as f:
+            plistlib.dump(info_plist, f)
+
+        # Register with Launch Services (-f to force)
+        subprocess.run([lsregister, "-f", app_dir], check=True, capture_output=True)
+
+        def _cleanup():
+            subprocess.run([lsregister, "-u", app_dir], capture_output=True)
+            shutil.rmtree(app_dir, ignore_errors=True)
+
+        self._cleanup_actions.append(_cleanup)
+        logger.info(f"Registered macOS URL scheme handler: {app_dir}")
+        return True
+
+    # --- Linux ---
+
+    def _register_linux(self) -> bool:
+        apps_dir = os.path.expanduser("~/.local/share/applications")
+        os.makedirs(apps_dir, exist_ok=True)
+
+        # Create a helper script that curls our local server
+        script_path = os.path.join(tempfile.gettempdir(), "zendesk-mcp-auth-handler.sh")
+        with open(script_path, "w") as f:
+            f.write(f"""#!/bin/sh
+curl -s -G --data-urlencode "url=$1" \\
+    "http://127.0.0.1:{self.callback_port}/callback" \\
+    >/dev/null 2>&1 &
+""")
+        os.chmod(script_path, 0o755)
+
+        # Create .desktop file
+        desktop_path = os.path.join(apps_dir, "zendesk-mcp-auth.desktop")
+        with open(desktop_path, "w") as f:
+            f.write(f"""[Desktop Entry]
+Type=Application
+Name=Zendesk MCP Auth
+Exec={script_path} %u
+NoDisplay=true
+MimeType=x-scheme-handler/{self.SCHEME};
+""")
+
+        # Register as default handler
+        subprocess.run(
+            ["xdg-mime", "default", "zendesk-mcp-auth.desktop",
+             f"x-scheme-handler/{self.SCHEME}"],
+            check=True, capture_output=True,
+        )
+
+        def _cleanup():
+            os.unlink(desktop_path)
+            os.unlink(script_path)
+            # xdg-mime doesn't have an "unregister", removing the file is enough
+
+        self._cleanup_actions.append(_cleanup)
+        logger.info("Registered Linux URL scheme handler via xdg-mime")
+        return True
+
+    # --- Windows ---
+
+    def _register_windows(self) -> bool:
+        import winreg
+
+        # Create a helper batch script
+        script_path = os.path.join(tempfile.gettempdir(), "zendesk-mcp-auth.bat")
+        with open(script_path, "w") as f:
+            f.write(f"""@echo off
+curl -s -G --data-urlencode "url=%1" ^
+    "http://127.0.0.1:{self.callback_port}/callback" >nul 2>&1
+""")
+
+        # Register URL protocol in HKCU (no admin needed)
+        key_path = f"Software\\Classes\\{self.SCHEME}"
+        winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path)
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_WRITE) as key:
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, f"URL:{self.SCHEME}")
+            winreg.SetValueEx(key, "URL Protocol", 0, winreg.REG_SZ, "")
+
+        cmd_path = f"{key_path}\\shell\\open\\command"
+        winreg.CreateKey(winreg.HKEY_CURRENT_USER, cmd_path)
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, cmd_path, 0, winreg.KEY_WRITE) as key:
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, f'"{script_path}" "%1"')
+
+        def _cleanup():
+            try:
+                # Delete in reverse order (leaf keys first)
+                for sub in [f"{key_path}\\shell\\open\\command",
+                            f"{key_path}\\shell\\open",
+                            f"{key_path}\\shell", key_path]:
+                    winreg.DeleteKey(winreg.HKEY_CURRENT_USER, sub)
+            except OSError:
+                pass
+            os.unlink(script_path)
+
+        self._cleanup_actions.append(_cleanup)
+        logger.info("Registered Windows URL scheme handler via registry")
+        return True
+
+
 def auth_via_browser(subdomain: str, timeout: int = 300) -> dict:
     """
     Non-interactive browser-based OAuth flow.
 
     Discovers auth methods for the subdomain, opens the system browser,
     and waits for the user to complete authentication. No stdin required.
+
+    On macOS, registers a temporary URL scheme handler so the
+    zendesk-support:// redirect is captured automatically.
+    On other platforms, falls back to a paste-the-URL page.
 
     Used by the MCP server on startup when no valid auth is present.
     """
@@ -267,9 +462,7 @@ def auth_via_browser(subdomain: str, timeout: int = 300) -> dict:
     login = agent_logins[0]
     service = login.get("service")
 
-    # For all methods, use the browser-based flow
     if service == "zendesk":
-        # Email/password: use the web OAuth URL
         auth_url = login.get("url", f"https://{subdomain}.zendesk.com/access/oauth_mobile")
     else:
         auth_url = login.get("zendesk_url") or login.get("url")
@@ -279,7 +472,7 @@ def auth_via_browser(subdomain: str, timeout: int = 300) -> dict:
 
     full_auth_url = _build_auth_url(auth_url)
 
-    # Start local HTTP server for the auth page
+    # Start local HTTP server to receive the callback
     port = _find_free_port()
     result = {}
 
@@ -293,13 +486,9 @@ def auth_via_browser(subdomain: str, timeout: int = 300) -> dict:
                 if token_data:
                     result.update(token_data)
                     self.send_response(200)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.send_header("Content-Type", "text/html")
                     self.end_headers()
-                    self.wfile.write(json.dumps({
-                        "ok": True,
-                        "username": token_data.get("username"),
-                    }).encode())
+                    self.wfile.write(SUCCESS_HTML.encode())
                     threading.Thread(target=self.server.shutdown, daemon=True).start()
                 else:
                     self.send_response(200)
@@ -310,6 +499,7 @@ def auth_via_browser(subdomain: str, timeout: int = 300) -> dict:
                         "error": "Could not parse access token from URL.",
                     }).encode())
             else:
+                # Fallback page for manual paste (when URL scheme handler isn't available)
                 html = AUTH_PAGE_HTML.format(auth_url=full_auth_url)
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html")
@@ -323,12 +513,26 @@ def auth_via_browser(subdomain: str, timeout: int = 300) -> dict:
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
 
-    local_url = f"http://127.0.0.1:{port}/auth"
-    logger.info(f"Opening browser for authentication: {local_url}")
-    webbrowser.open(local_url)
+    # Try to register a URL scheme handler (macOS only)
+    scheme_handler = _UrlSchemeHandler(port)
+    handler_registered = scheme_handler.register()
 
-    server_thread.join(timeout=timeout)
-    server.server_close()
+    try:
+        if handler_registered:
+            # Handler registered — open the auth URL directly.
+            # The OS will route zendesk-support:// back to our handler.
+            logger.info("URL scheme handler registered. Opening Zendesk login directly.")
+            webbrowser.open(full_auth_url)
+        else:
+            # No handler — open our local page with paste instructions
+            local_url = f"http://127.0.0.1:{port}/auth"
+            logger.info(f"Opening browser for authentication: {local_url}")
+            webbrowser.open(local_url)
+
+        server_thread.join(timeout=timeout)
+        server.server_close()
+    finally:
+        scheme_handler.cleanup()
 
     if not result:
         raise RuntimeError(
