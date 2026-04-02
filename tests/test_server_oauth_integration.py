@@ -1,17 +1,15 @@
 """
 End-to-end wiring: MCP tools running over OAuth against a mocked Zendesk.
 
-Covers all four ways this server talks to Zendesk, since each authenticates
+Covers all three ways this server talks to Zendesk, since each authenticates
 differently and could regress independently:
 
 * zenpy reads     — GET through the injected session
 * zenpy writes    — PUT/POST through the injected session
-* direct session  — attachment download
-* direct urllib   — get_tickets pagination
+* direct session  — attachment download, get_tickets pagination
 """
 import asyncio
 import json
-import urllib.request
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -248,31 +246,19 @@ def test_knowledge_base_resource_over_oauth(oauth_server):
     assert set(authorization_headers()) == {BEARER}
 
 
-def test_get_tickets_over_oauth(oauth_server, monkeypatch):
-    """get_tickets uses urllib directly, so it is checked separately."""
-    captured = {}
-
-    class FakeResponse:
-        def read(self):
-            return json.dumps({"tickets": [TICKET_JSON], "next_page": None}).encode()
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
-
-    def fake_urlopen(request, *args, **kwargs):
-        captured["authorization"] = request.get_header("Authorization")
-        return FakeResponse()
-
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+@responses.activate
+def test_get_tickets_over_oauth(oauth_server):
+    responses.add(
+        responses.GET,
+        f"{API}/tickets.json",
+        json={"tickets": [TICKET_JSON], "next_page": None},
+    )
 
     body = payload_of(call_tool(oauth_server, "get_tickets", {"per_page": 5}))
 
     assert body["count"] == 1
     assert body["tickets"][0]["id"] == 42
-    assert captured["authorization"] == BEARER
+    assert authorization_headers() == [BEARER]
 
 
 @responses.activate

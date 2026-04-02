@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 from typing import Any, Dict
 
 from cachetools.func import ttl_cache
@@ -10,6 +11,7 @@ from mcp.server import Server, types
 from mcp.server.stdio import stdio_server
 from pydantic import AnyUrl
 
+from zendesk_mcp_server.auth import SessionCookieAuthProvider
 from zendesk_mcp_server.factory import build_client
 from zendesk_mcp_server.zendesk_client import ZendeskClient
 
@@ -26,6 +28,19 @@ load_dotenv()
 _zendesk_client: ZendeskClient | None = None
 
 
+def _init_client() -> ZendeskClient:
+    """Use cookie auth when a session cookie is the only credential configured."""
+    session_cookie = os.getenv("ZENDESK_SESSION_COOKIE")
+    if session_cookie and not os.getenv("ZENDESK_CLIENT_ID") and not (
+        os.getenv("ZENDESK_EMAIL") and os.getenv("ZENDESK_API_KEY")
+    ):
+        return ZendeskClient(
+            subdomain=os.getenv("ZENDESK_SUBDOMAIN"),
+            auth=SessionCookieAuthProvider(session_cookie),
+        )
+    return build_client()
+
+
 def get_zendesk_client() -> ZendeskClient:
     """
     Return the shared client, building it on first use.
@@ -36,7 +51,7 @@ def get_zendesk_client() -> ZendeskClient:
     """
     global _zendesk_client
     if _zendesk_client is None:
-        _zendesk_client = build_client()
+        _zendesk_client = _init_client()
     return _zendesk_client
 
 server = Server("Zendesk Server")

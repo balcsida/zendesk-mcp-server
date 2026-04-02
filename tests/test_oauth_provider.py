@@ -201,66 +201,29 @@ def test_refresh_is_skipped_when_another_process_already_rotated(settings, store
     assert len(responses.calls) == 0
 
 
-def test_get_tickets_sends_the_bearer_token(settings, store, monkeypatch):
-    """The direct urllib path authenticates through the same provider."""
-    import json
-    import urllib.request
-
+@responses.activate
+def test_get_tickets_sends_the_bearer_token(settings, store):
+    """The direct API path authenticates through the same provider."""
     stored_tokens(store)
     client = ZendeskClient(subdomain=SUBDOMAIN, auth=OAuthAuthProvider(settings, store=store))
-    captured = {}
-
-    class FakeResponse:
-        def read(self):
-            return json.dumps({"tickets": [], "next_page": None}).encode()
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
-
-    def fake_urlopen(request, *args, **kwargs):
-        captured["authorization"] = request.get_header("Authorization")
-        return FakeResponse()
-
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    responses.add(responses.GET, f"{client.base_url}/tickets.json", json={"tickets": [], "next_page": None})
 
     client.get_tickets()
 
-    assert captured["authorization"] == "Bearer access-1"
+    assert responses.calls[0].request.headers["Authorization"] == "Bearer access-1"
 
 
 @responses.activate
-def test_get_tickets_refreshes_an_expired_token_before_calling(settings, store, monkeypatch):
-    """Proactive refresh covers the urllib path, which has no response hook."""
-    import json
-    import urllib.request
-
+def test_get_tickets_refreshes_an_expired_token_before_calling(settings, store):
     stored_tokens(store, expires_in=timedelta(seconds=10))
     add_refresh_response()
     client = ZendeskClient(subdomain=SUBDOMAIN, auth=OAuthAuthProvider(settings, store=store))
-    captured = {}
-
-    class FakeResponse:
-        def read(self):
-            return json.dumps({"tickets": [], "next_page": None}).encode()
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
-
-    def fake_urlopen(request, *args, **kwargs):
-        captured["authorization"] = request.get_header("Authorization")
-        return FakeResponse()
-
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    responses.add(responses.GET, f"{client.base_url}/tickets.json", json={"tickets": [], "next_page": None})
 
     client.get_tickets()
 
-    assert captured["authorization"] == "Bearer access-2"
+    tickets_call = [c for c in responses.calls if "/tickets.json" in c.request.url][0]
+    assert tickets_call.request.headers["Authorization"] == "Bearer access-2"
 
 
 class TestReactiveRetry:
