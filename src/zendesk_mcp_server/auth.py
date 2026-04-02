@@ -344,7 +344,17 @@ class _UrlSchemeHandler:
         subprocess.run([lsregister, "-f", app_dir], check=True, capture_output=True)
 
         def _cleanup():
+            # Unregister from Launch Services
             subprocess.run([lsregister, "-u", app_dir], capture_output=True)
+            # Also clear the default handler via CoreServices API
+            # (lsregister -u doesn't always work for URL schemes)
+            subprocess.run(
+                ["swift", "-e",
+                 'import Foundation; import CoreServices;'
+                 ' LSSetDefaultHandlerForURLScheme('
+                 '"zendesk-support" as CFString, "" as CFString)'],
+                capture_output=True,
+            )
             shutil.rmtree(app_dir, ignore_errors=True)
 
         self._cleanup_actions.append(_cleanup)
