@@ -76,6 +76,11 @@ class ZendeskClient:
         resp.raise_for_status()
         return resp.json()
 
+    def _api_delete(self, path: str) -> None:
+        """Make a DELETE request to the Zendesk API."""
+        resp = self._session.delete(f"{self.base_url}/{path}", timeout=30)
+        resp.raise_for_status()
+
     def get_ticket(self, ticket_id: int) -> Dict[str, Any]:
         """
         Query a ticket by its ID
@@ -394,3 +399,266 @@ class ZendeskClient:
             }
         except Exception as e:
             raise Exception(f"Failed to update ticket {ticket_id}: {str(e)}")
+
+    # ── P0: Search & Users ──────────────────────────────────────────────
+
+    def search(self, query: str, page: int = 1, per_page: int = 25,
+               sort_by: str = 'relevance', sort_order: str = 'desc') -> Dict[str, Any]:
+        """Search tickets, users, orgs using Zendesk Query Language (ZQL)."""
+        try:
+            per_page = min(per_page, 100)
+            params = urllib.parse.urlencode({
+                'query': query, 'page': str(page),
+                'per_page': str(per_page),
+                'sort_by': sort_by, 'sort_order': sort_order,
+            })
+            data = self._api_get(f"search.json?{params}")
+            return {
+                'results': data.get('results', []),
+                'count': data.get('count', 0),
+                'page': page,
+                'per_page': per_page,
+                'has_more': data.get('next_page') is not None,
+            }
+        except Exception as e:
+            raise Exception(f"Search failed: {str(e)}")
+
+    def get_user(self, user_id: int) -> Dict[str, Any]:
+        """Get a user by ID."""
+        try:
+            data = self._api_get(f"users/{user_id}.json")
+            u = data['user']
+            return {
+                'id': u.get('id'), 'name': u.get('name'),
+                'email': u.get('email'), 'role': u.get('role'),
+                'phone': u.get('phone'), 'photo_url': (u.get('photo') or {}).get('content_url'),
+                'organization_id': u.get('organization_id'),
+                'time_zone': u.get('time_zone'),
+                'active': u.get('active'), 'suspended': u.get('suspended'),
+                'created_at': u.get('created_at'), 'updated_at': u.get('updated_at'),
+                'tags': u.get('tags', []),
+            }
+        except Exception as e:
+            raise Exception(f"Failed to get user {user_id}: {str(e)}")
+
+    def get_current_user(self) -> Dict[str, Any]:
+        """Get the currently authenticated user."""
+        try:
+            data = self._api_get("users/me.json")
+            u = data['user']
+            return {
+                'id': u.get('id'), 'name': u.get('name'),
+                'email': u.get('email'), 'role': u.get('role'),
+                'organization_id': u.get('organization_id'),
+                'time_zone': u.get('time_zone'),
+                'default_group_id': u.get('default_group_id'),
+            }
+        except Exception as e:
+            raise Exception(f"Failed to get current user: {str(e)}")
+
+    def search_users(self, query: str) -> List[Dict[str, Any]]:
+        """Search users by name, email, or external_id."""
+        try:
+            params = urllib.parse.urlencode({'query': query})
+            data = self._api_get(f"users/search.json?{params}")
+            return [{
+                'id': u.get('id'), 'name': u.get('name'),
+                'email': u.get('email'), 'role': u.get('role'),
+                'organization_id': u.get('organization_id'),
+                'active': u.get('active'),
+            } for u in data.get('users', [])]
+        except Exception as e:
+            raise Exception(f"User search failed: {str(e)}")
+
+    # ── P1: Views, Fields, Orgs, Bulk ───────────────────────────────────
+
+    def list_views(self) -> List[Dict[str, Any]]:
+        """List all available views."""
+        try:
+            data = self._api_get("views.json")
+            return [{
+                'id': v.get('id'), 'title': v.get('title'),
+                'active': v.get('active'),
+                'position': v.get('position'),
+            } for v in data.get('views', [])]
+        except Exception as e:
+            raise Exception(f"Failed to list views: {str(e)}")
+
+    def execute_view(self, view_id: int, page: int = 1, per_page: int = 25) -> Dict[str, Any]:
+        """Execute a view and return its tickets."""
+        try:
+            per_page = min(per_page, 100)
+            params = urllib.parse.urlencode({'page': str(page), 'per_page': str(per_page)})
+            data = self._api_get(f"views/{view_id}/tickets.json?{params}")
+            return {
+                'tickets': [{
+                    'id': t.get('id'), 'subject': t.get('subject'),
+                    'status': t.get('status'), 'priority': t.get('priority'),
+                    'requester_id': t.get('requester_id'),
+                    'assignee_id': t.get('assignee_id'),
+                    'group_id': t.get('group_id'),
+                    'created_at': t.get('created_at'),
+                    'updated_at': t.get('updated_at'),
+                } for t in data.get('tickets', [])],
+                'count': len(data.get('tickets', [])),
+                'has_more': data.get('next_page') is not None,
+            }
+        except Exception as e:
+            raise Exception(f"Failed to execute view {view_id}: {str(e)}")
+
+    def list_ticket_fields(self) -> List[Dict[str, Any]]:
+        """List all ticket fields (system + custom)."""
+        try:
+            data = self._api_get("ticket_fields.json")
+            return [{
+                'id': f.get('id'), 'title': f.get('title'),
+                'type': f.get('type'), 'active': f.get('active'),
+                'required': f.get('required'),
+                'custom_field_options': [
+                    {'name': o.get('name'), 'value': o.get('value')}
+                    for o in f.get('custom_field_options', [])
+                ] if f.get('custom_field_options') else None,
+            } for f in data.get('ticket_fields', [])]
+        except Exception as e:
+            raise Exception(f"Failed to list ticket fields: {str(e)}")
+
+    def get_organization(self, org_id: int) -> Dict[str, Any]:
+        """Get an organization by ID."""
+        try:
+            data = self._api_get(f"organizations/{org_id}.json")
+            o = data['organization']
+            return {
+                'id': o.get('id'), 'name': o.get('name'),
+                'domain_names': o.get('domain_names', []),
+                'details': o.get('details'), 'notes': o.get('notes'),
+                'group_id': o.get('group_id'),
+                'tags': o.get('tags', []),
+                'created_at': o.get('created_at'),
+                'updated_at': o.get('updated_at'),
+            }
+        except Exception as e:
+            raise Exception(f"Failed to get organization {org_id}: {str(e)}")
+
+    def search_organizations(self, query: str) -> List[Dict[str, Any]]:
+        """Search organizations by name or external_id."""
+        try:
+            params = urllib.parse.urlencode({'name': query})
+            data = self._api_get(f"organizations/autocomplete.json?{params}")
+            return [{
+                'id': o.get('id'), 'name': o.get('name'),
+                'domain_names': o.get('domain_names', []),
+            } for o in data.get('organizations', [])]
+        except Exception as e:
+            raise Exception(f"Organization search failed: {str(e)}")
+
+    def get_tickets_bulk(self, ticket_ids: List[int]) -> List[Dict[str, Any]]:
+        """Fetch multiple tickets by IDs in a single request (max 100)."""
+        try:
+            ids_str = ','.join(str(i) for i in ticket_ids[:100])
+            data = self._api_get(f"tickets/show_many.json?ids={ids_str}")
+            return [{
+                'id': t.get('id'), 'subject': t.get('subject'),
+                'status': t.get('status'), 'priority': t.get('priority'),
+                'requester_id': t.get('requester_id'),
+                'assignee_id': t.get('assignee_id'),
+                'group_id': t.get('group_id'),
+                'created_at': t.get('created_at'),
+                'updated_at': t.get('updated_at'),
+            } for t in data.get('tickets', [])]
+        except Exception as e:
+            raise Exception(f"Bulk ticket fetch failed: {str(e)}")
+
+    # ── P2: Groups, Merge, Macros ───────────────────────────────────────
+
+    def list_groups(self) -> List[Dict[str, Any]]:
+        """List assignable groups."""
+        try:
+            data = self._api_get("groups/assignable.json")
+            return [{
+                'id': g.get('id'), 'name': g.get('name'),
+                'description': g.get('description'),
+            } for g in data.get('groups', [])]
+        except Exception as e:
+            raise Exception(f"Failed to list groups: {str(e)}")
+
+    def merge_tickets(self, target_id: int, source_ids: List[int],
+                      target_comment: str = "Merged from related tickets.",
+                      source_comment: str = "This ticket has been merged.") -> Dict[str, Any]:
+        """Merge source tickets into a target ticket."""
+        try:
+            data = {
+                "ids": source_ids,
+                "target_comment": target_comment,
+                "source_comment": source_comment,
+            }
+            result = self._api_post(f"tickets/{target_id}/merge.json", data)
+            return result
+        except Exception as e:
+            raise Exception(f"Failed to merge tickets into {target_id}: {str(e)}")
+
+    def list_macros(self, active_only: bool = True) -> List[Dict[str, Any]]:
+        """List available macros."""
+        try:
+            path = "macros/active.json" if active_only else "macros.json"
+            data = self._api_get(path)
+            return [{
+                'id': m.get('id'), 'title': m.get('title'),
+                'description': m.get('description'),
+                'active': m.get('active'),
+            } for m in data.get('macros', [])]
+        except Exception as e:
+            raise Exception(f"Failed to list macros: {str(e)}")
+
+    def apply_macro(self, ticket_id: int, macro_id: int) -> Dict[str, Any]:
+        """Preview the result of applying a macro to a ticket."""
+        try:
+            data = self._api_get(f"tickets/{ticket_id}/macros/{macro_id}/apply.json")
+            result = data.get('result', {})
+            ticket = result.get('ticket', {})
+            return {
+                'ticket_changes': ticket,
+                'comment': result.get('comment'),
+            }
+        except Exception as e:
+            raise Exception(f"Failed to apply macro {macro_id} to ticket {ticket_id}: {str(e)}")
+
+    # ── P3: User Tickets, Forms, Delete ─────────────────────────────────
+
+    def get_user_tickets(self, user_id: int, role: str = 'requested',
+                         page: int = 1, per_page: int = 25) -> Dict[str, Any]:
+        """Get tickets for a user. role: 'requested', 'assigned', or 'ccd'."""
+        try:
+            per_page = min(per_page, 100)
+            params = urllib.parse.urlencode({'page': str(page), 'per_page': str(per_page)})
+            data = self._api_get(f"users/{user_id}/tickets/{role}.json?{params}")
+            return {
+                'tickets': [{
+                    'id': t.get('id'), 'subject': t.get('subject'),
+                    'status': t.get('status'), 'priority': t.get('priority'),
+                    'created_at': t.get('created_at'),
+                    'updated_at': t.get('updated_at'),
+                } for t in data.get('tickets', [])],
+                'has_more': data.get('next_page') is not None,
+            }
+        except Exception as e:
+            raise Exception(f"Failed to get tickets for user {user_id}: {str(e)}")
+
+    def list_ticket_forms(self) -> List[Dict[str, Any]]:
+        """List all ticket forms."""
+        try:
+            data = self._api_get("ticket_forms.json")
+            return [{
+                'id': f.get('id'), 'name': f.get('name'),
+                'display_name': f.get('display_name'),
+                'active': f.get('active'), 'default': f.get('default'),
+                'ticket_field_ids': f.get('ticket_field_ids', []),
+            } for f in data.get('ticket_forms', [])]
+        except Exception as e:
+            raise Exception(f"Failed to list ticket forms: {str(e)}")
+
+    def delete_ticket(self, ticket_id: int) -> None:
+        """Permanently delete a ticket."""
+        try:
+            self._api_delete(f"tickets/{ticket_id}.json")
+        except Exception as e:
+            raise Exception(f"Failed to delete ticket {ticket_id}: {str(e)}")
