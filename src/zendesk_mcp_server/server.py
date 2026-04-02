@@ -22,11 +22,29 @@ logger = logging.getLogger("zendesk-mcp-server")
 logger.info("zendesk mcp server started")
 
 load_dotenv()
+
+# Try to load OAuth token from token file first
+_oauth_token = None
+_oauth_subdomain = None
+try:
+    from zendesk_mcp_server.auth import load_token
+    _token_data = load_token(os.path.dirname(os.path.abspath(__file__ + "/../..")))
+    if not _token_data:
+        # Also try the working directory
+        _token_data = load_token()
+    if _token_data:
+        _oauth_token = _token_data.get("access_token")
+        _oauth_subdomain = _token_data.get("subdomain")
+        logger.info("Loaded OAuth token from token file")
+except Exception:
+    pass
+
 zendesk_client = ZendeskClient(
-    subdomain=os.getenv("ZENDESK_SUBDOMAIN"),
+    subdomain=os.getenv("ZENDESK_SUBDOMAIN") or _oauth_subdomain,
     email=os.getenv("ZENDESK_EMAIL"),
     token=os.getenv("ZENDESK_API_KEY"),
     session_cookie=os.getenv("ZENDESK_SESSION_COOKIE"),
+    oauth_access_token=os.getenv("ZENDESK_OAUTH_TOKEN") or _oauth_token,
 )
 
 server = Server("Zendesk Server")
