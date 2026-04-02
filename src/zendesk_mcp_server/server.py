@@ -11,7 +11,7 @@ from mcp.server import Server, types
 from mcp.server.stdio import stdio_server
 from pydantic import AnyUrl
 
-from zendesk_mcp_server.auth import SessionCookieAuthProvider
+from zendesk_mcp_server.auth import BearerTokenAuthProvider, SessionCookieAuthProvider
 from zendesk_mcp_server.factory import build_client
 from zendesk_mcp_server.zendesk_client import ZendeskClient
 
@@ -29,15 +29,32 @@ _zendesk_client: ZendeskClient | None = None
 
 
 def _init_client() -> ZendeskClient:
-    """Use cookie auth when a session cookie is the only credential configured."""
+    """
+    Pick the auth method from the environment.
+
+    A mobile OAuth token (ZENDESK_OAUTH_TOKEN or the .zendesk_token file) wins
+    over an API token, which wins over a session cookie. ZENDESK_CLIENT_ID
+    selects OAuth with PKCE instead.
+    """
+    from zendesk_mcp_server.mobile_auth import load_token
+
+    if os.getenv("ZENDESK_CLIENT_ID"):
+        return build_client()
+
+    subdomain = os.getenv("ZENDESK_SUBDOMAIN")
+    oauth_token = os.getenv("ZENDESK_OAUTH_TOKEN")
+    if not oauth_token:
+        token_data = load_token()
+        if token_data:
+            oauth_token = token_data.get("access_token")
+            subdomain = subdomain or token_data.get("subdomain")
+            logger.info("Loaded OAuth token from token file")
+    if oauth_token:
+        return ZendeskClient(subdomain=subdomain, auth=BearerTokenAuthProvider(oauth_token))
+
     session_cookie = os.getenv("ZENDESK_SESSION_COOKIE")
-    if session_cookie and not os.getenv("ZENDESK_CLIENT_ID") and not (
-        os.getenv("ZENDESK_EMAIL") and os.getenv("ZENDESK_API_KEY")
-    ):
-        return ZendeskClient(
-            subdomain=os.getenv("ZENDESK_SUBDOMAIN"),
-            auth=SessionCookieAuthProvider(session_cookie),
-        )
+    if session_cookie and not (os.getenv("ZENDESK_EMAIL") and os.getenv("ZENDESK_API_KEY")):
+        return ZendeskClient(subdomain=subdomain, auth=SessionCookieAuthProvider(session_cookie))
     return build_client()
 
 

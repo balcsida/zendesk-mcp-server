@@ -93,3 +93,18 @@ class SessionCookieAuthProvider(AuthBase):
         cookies = request.headers.get("Cookie")
         request.headers["Cookie"] = f"{cookies}; {self._cookie}" if cookies else self._cookie
         return request
+
+
+class BearerTokenAuthProvider(_HeaderAuthProvider):
+    """
+    A fixed OAuth access token, such as the one ``zendesk-mobile-auth`` saves.
+
+    There is no refresh token, so an expired token is replaced by signing in
+    again rather than renewed.
+    """
+
+    def __init__(self, access_token: str):
+        self._header = f"Bearer {access_token}"
+
+    def auth_header(self) -> str:
+        return self._header
