@@ -23,29 +23,61 @@ logger.info("zendesk mcp server started")
 
 load_dotenv()
 
-# Try to load OAuth token from token file first
-_oauth_token = None
-_oauth_subdomain = None
-try:
-    from zendesk_mcp_server.auth import load_token
-    _token_data = load_token(os.path.dirname(os.path.abspath(__file__ + "/../..")))
-    if not _token_data:
-        # Also try the working directory
-        _token_data = load_token()
-    if _token_data:
-        _oauth_token = _token_data.get("access_token")
-        _oauth_subdomain = _token_data.get("subdomain")
-        logger.info("Loaded OAuth token from token file")
-except Exception:
-    pass
 
-zendesk_client = ZendeskClient(
-    subdomain=os.getenv("ZENDESK_SUBDOMAIN") or _oauth_subdomain,
-    email=os.getenv("ZENDESK_EMAIL"),
-    token=os.getenv("ZENDESK_API_KEY"),
-    session_cookie=os.getenv("ZENDESK_SESSION_COOKIE"),
-    oauth_access_token=os.getenv("ZENDESK_OAUTH_TOKEN") or _oauth_token,
-)
+def _init_client() -> ZendeskClient:
+    """
+    Initialize the Zendesk client with the best available auth method.
+
+    Priority:
+    1. Env var ZENDESK_OAUTH_TOKEN or ZENDESK_API_KEY (explicit config)
+    2. Saved OAuth token from .zendesk_token file
+    3. Browser-based OAuth flow (opens browser for login)
+    """
+    from zendesk_mcp_server.auth import ensure_auth, load_token
+
+    subdomain = os.getenv("ZENDESK_SUBDOMAIN")
+    email = os.getenv("ZENDESK_EMAIL")
+    api_key = os.getenv("ZENDESK_API_KEY")
+    oauth_token = os.getenv("ZENDESK_OAUTH_TOKEN")
+    session_cookie = os.getenv("ZENDESK_SESSION_COOKIE")
+
+    # If explicit credentials are set, use them directly
+    if oauth_token or (email and api_key) or session_cookie:
+        oauth_from_file = None
+        if not oauth_token:
+            token_data = load_token()
+            if token_data:
+                oauth_from_file = token_data.get("access_token")
+                subdomain = subdomain or token_data.get("subdomain")
+        return ZendeskClient(
+            subdomain=subdomain,
+            email=email,
+            token=api_key,
+            session_cookie=session_cookie,
+            oauth_access_token=oauth_token or oauth_from_file,
+        )
+
+    # No explicit credentials - try token file, then browser auth
+    if not subdomain:
+        # Check if token file has a subdomain
+        token_data = load_token()
+        if token_data:
+            subdomain = token_data.get("subdomain")
+
+    if not subdomain:
+        raise ValueError(
+            "ZENDESK_SUBDOMAIN is required. Set it in .env or run 'zendesk-auth'."
+        )
+
+    # ensure_auth will check existing token, verify it, or open browser
+    token_data = ensure_auth(subdomain)
+    return ZendeskClient(
+        subdomain=subdomain,
+        oauth_access_token=token_data["access_token"],
+    )
+
+
+zendesk_client = _init_client()
 
 server = Server("Zendesk Server")
 
