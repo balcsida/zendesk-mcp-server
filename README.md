@@ -35,6 +35,12 @@ This server provides a comprehensive integration with Zendesk. It offers:
 }
 ```
 
+## Troubleshooting
+
+### Safari SAML Authentication Issues
+
+If you encounter issues with SAML authentication when accessing Zendesk through Safari, this is a known compatibility issue. We recommend using Chrome or another Chromium-based browser for authentication instead.
+
 ### Docker
 
 You can containerize the server if you prefer an isolated runtime:
@@ -79,6 +85,35 @@ To use the Dockerized server from Claude Code/Desktop, add an entry to Claude Co
 ```
 
 Adjust the paths to match your environment. After saving the file, restart Claude for the new MCP server to be detected.
+
+## Troubleshooting
+
+### Safari Authentication Issues (macOS)
+
+If you're using Safari and seeing errors like "Safari cannot open the page because the address is invalid" with URLs containing `SAMLRequest` or `SAMLResponse`, this is a **known issue with Safari's handling of SAML redirects**.
+
+**Solution:** The authentication system will automatically try to use Chrome first. If you don't have Chrome installed:
+
+1. Install Chrome: `brew install --cask google-chrome`
+2. Run the authentication again: `python test_auth.py`
+
+**Why this happens:**
+- Safari has strict security policies that prevent SAML POST requests from being completed in the OAuth mobile flow
+- The SAML identity provider tries to POST back to Zendesk, but Safari blocks this
+- Chrome and Firefox handle these SAML flows more gracefully
+
+**Alternative workaround:** If you must use Safari:
+1. Safari → Preferences → Privacy → Uncheck "Prevent cross-site tracking"
+2. Try authentication again
+3. Re-enable tracking prevention after authentication completes
+
+### Authentication Timeout
+
+If authentication times out after 5 minutes:
+
+1. Check that the URL scheme handler registered successfully (look for `✓ URL scheme handler registered`)
+2. Try the manual fallback mode by opening `http://127.0.0.1:<port>/auth` in your browser
+3. Complete the authentication and copy/paste the `zendesk-support://` URL from the address bar
 
 ## Resources
 

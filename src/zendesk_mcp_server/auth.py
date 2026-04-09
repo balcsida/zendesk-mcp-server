@@ -34,7 +34,24 @@ USER_AGENT = "Zendesk-SDK/1.0 Android/30 Variant/Core"
 TOKEN_FILE = ".zendesk_token"
 
 SUCCESS_HTML = """<!DOCTYPE html>
-<html><head><title>Zendesk Auth</title></head>
+<html><head><title>Zendesk Auth</title>
+<script>
+// Check if we have a zendesk-support URL in the URL hash (Safari workaround)
+window.addEventListener('DOMContentLoaded', function() {
+    var hash = window.location.hash;
+    if (hash && hash.startsWith('#zendesk-support://')) {
+        var callbackUrl = decodeURIComponent(hash.substring(1));
+        console.log('Captured callback URL from hash:', callbackUrl);
+        // Forward it to our local server
+        fetch('/callback?url=' + encodeURIComponent(callbackUrl))
+            .then(function() {
+                document.body.innerHTML = '<h2 style=\"color:#2e7d32\">&#9989; Authentication successful!</h2>' +
+                    '<p>Token captured and saved. You can close this tab.</p>';
+            });
+    }
+});
+</script>
+</head>
 <body style="font-family:system-ui,sans-serif;text-align:center;padding:60px">
 <h2>&#9989; Authentication successful!</h2>
 <p>You can close this tab. The MCP server is starting.</p>
@@ -115,8 +132,14 @@ document.addEventListener('DOMContentLoaded', function() {{
   <div class="step" id="step2" style="display:none">
     <p><span class="step-num">Step 2:</span> After signing in, the browser will show an error page
     about <code>zendesk-support://</code> not being recognized.</p>
-    <p>Copy the <strong>full URL</strong> from the address bar and paste it here:</p>
-    <input type="text" id="callback-url" placeholder="zendesk-support://?access_token=...">
+    <p><strong>Where to find the URL:</strong></p>
+    <ul style="text-align:left; font-size:14px;">
+      <li><strong>Address bar:</strong> Look for a URL starting with <code>zendesk-support://</code></li>
+      <li><strong>Chrome console:</strong> Press F12 → Console tab → Look for "Failed to launch 'zendesk-support://...'"</li>
+      <li><strong>Error page:</strong> Some browsers display the URL in the error message</li>
+    </ul>
+    <p>Copy the <strong>full URL</strong> (including all parameters) and paste it here:</p>
+    <input type="text" id="callback-url" placeholder="zendesk-support://authenticate?access_token=...">
     <br>
     <button onclick="submitUrl()">Authenticate</button>
   </div>
@@ -226,22 +249,28 @@ def _open_in_private_window(url: str) -> bool:
     """
     try:
         if sys.platform == "darwin":
-            # Try common browsers in private mode
-            for args in [
-                # Edge (InPrivate)
-                ["open", "-na", "Microsoft Edge", "--args", "--inprivate", url],
-                # Chrome (Incognito)
-                ["open", "-na", "Google Chrome", "--args", "--incognito", url],
-                # Safari (no CLI flag for private, skip)
+            # Try common browsers in private mode (Chrome first - best SAML support)
+            # Use full app paths for reliability
+            browsers = [
+                # Chrome (Incognito) - best for SAML
+                ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", ["--incognito", url], "Chrome"),
                 # Firefox
-                ["open", "-na", "Firefox", "--args", "--private-window", url],
-            ]:
-                try:
-                    subprocess.run(args, check=True, capture_output=True, timeout=5)
-                    logger.info(f"Opened private window via: {args[3]}")
-                    return True
-                except (subprocess.CalledProcessError, FileNotFoundError):
-                    continue
+                ("/Applications/Firefox.app/Contents/MacOS/firefox", ["--private-window", url], "Firefox"),
+                # Edge (InPrivate)
+                ("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge", ["--inprivate", url], "Edge"),
+            ]
+
+            for binary_path, args, name in browsers:
+                if os.path.exists(binary_path):
+                    try:
+                        subprocess.Popen([binary_path] + args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        logger.info(f"✓ Opened private window via: {name}")
+                        return True
+                    except Exception as e:
+                        logger.warning(f"Failed to launch {name}: {e}")
+                        continue
+                else:
+                    logger.debug(f"{name} not found at {binary_path}")
         elif sys.platform == "linux":
             for args in [
                 ["xdg-open", url],  # Fallback; can't force private easily
@@ -272,16 +301,30 @@ def _open_in_private_window(url: str) -> bool:
 
 def _parse_oauth_callback(url: str, subdomain: str) -> dict | None:
     """Parse the OAuth callback URL to extract token data."""
+    logger.info(f"Parsing OAuth callback URL...")
     if not url:
+        logger.error("Empty callback URL")
         return None
+
+    logger.info(f"URL scheme: {urlparse(url).scheme}")
+    logger.info(f"URL length: {len(url)} chars")
+
     parsed = urlparse(url)
     params = parse_qs(parsed.query)
+    logger.info(f"Query params found: {list(params.keys())}")
+
     if not params and parsed.fragment:
+        logger.info("No query params, checking fragment...")
         params = parse_qs(parsed.fragment)
+        logger.info(f"Fragment params found: {list(params.keys())}")
 
     access_token = (params.get("access_token") or [None])[0]
     if not access_token:
+        logger.error(f"No access_token found in params. Available keys: {list(params.keys())}")
         return None
+
+    logger.info(f"✓ Access token found (length: {len(access_token)})")
+    logger.debug(f"Additional params: username={params.get('username', ['N/A'])[0]}, user_id={params.get('user_id', ['N/A'])[0]}")
 
     return {
         "subdomain": subdomain,
@@ -345,6 +388,7 @@ class _UrlSchemeHandler:
 
     def _register_macos(self) -> bool:
         import plistlib
+        logger.info("Registering macOS URL scheme handler...")
         lsregister = (
             "/System/Library/Frameworks/CoreServices.framework"
             "/Frameworks/LaunchServices.framework/Support/lsregister"
@@ -353,33 +397,54 @@ class _UrlSchemeHandler:
         apps_dir = os.path.expanduser("~/Applications")
         os.makedirs(apps_dir, exist_ok=True)
         app_dir = os.path.join(apps_dir, "ZendeskMCPAuth.app")
+        logger.info(f"App bundle location: {app_dir}")
 
         # Clean up any previous handler first
+        if os.path.exists(app_dir):
+            logger.info("Removing existing app bundle...")
         shutil.rmtree(app_dir, ignore_errors=True)
 
         # Compile an AppleScript that handles the URL scheme via Apple Events.
         # `on open location` is how macOS delivers custom-scheme URLs to apps.
         # Write to temp file to avoid shell escaping issues with -e flag.
         script_file = os.path.join(tempfile.gettempdir(), "zendesk_auth.applescript")
+        logger.info(f"Creating AppleScript at: {script_file}")
         with open(script_file, "w") as f:
-            f.write(
+            # Note: Removed the trailing '&' to make curl synchronous
+            # This ensures the callback completes before AppleScript exits
+            # Added explicit timeout to prevent hanging
+            script_content = (
                 'on open location theURL\n'
-                '    do shell script "/usr/bin/curl -s -G '
+                '    try\n'
+                '        set curlResult to do shell script "/usr/bin/curl -s -G --max-time 10 '
                 '--data-urlencode url=" & quoted form of theURL '
-                f'& " \'http://127.0.0.1:{self.callback_port}/callback\''
-                ' > /dev/null 2>&1 &"\n'
+                f'& " \'http://127.0.0.1:{self.callback_port}/callback\'"\n'
+                '        log "Zendesk auth callback sent successfully"\n'
+                '        return curlResult\n'
+                '    on error errMsg\n'
+                '        log "Zendesk auth callback failed: " & errMsg\n'
+                '        return "error: " & errMsg\n'
+                '    end try\n'
                 'end open location\n'
             )
+            f.write(script_content)
+            logger.info(f"AppleScript content:\n{script_content}")
         try:
-            subprocess.run(
+            logger.info("Compiling AppleScript...")
+            result = subprocess.run(
                 ["osacompile", "-o", app_dir, script_file],
-                check=True, capture_output=True,
+                check=True, capture_output=True, text=True,
             )
+            logger.info("✓ AppleScript compiled successfully")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"✗ AppleScript compilation failed: {e.stderr}")
+            raise
         finally:
             os.unlink(script_file)
 
         # Patch Info.plist to register the URL scheme
         plist_path = os.path.join(app_dir, "Contents", "Info.plist")
+        logger.info(f"Modifying Info.plist: {plist_path}")
         with open(plist_path, "rb") as f:
             info_plist = plistlib.load(f)
 
@@ -392,26 +457,21 @@ class _UrlSchemeHandler:
         ]
         with open(plist_path, "wb") as f:
             plistlib.dump(info_plist, f)
+        logger.info("✓ Info.plist updated with URL scheme")
 
         # Register with Launch Services (-f to force)
-        subprocess.run([lsregister, "-f", app_dir], check=True, capture_output=True)
+        logger.info("Registering with Launch Services...")
+        try:
+            result = subprocess.run([lsregister, "-f", app_dir], check=True, capture_output=True, text=True)
+            logger.info("✓ Launch Services registration successful")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"✗ Launch Services registration failed: {e.stderr}")
+            raise
 
-        def _cleanup():
-            # Unregister from Launch Services
-            subprocess.run([lsregister, "-u", app_dir], capture_output=True)
-            # Also clear the default handler via CoreServices API
-            # (lsregister -u doesn't always work for URL schemes)
-            subprocess.run(
-                ["swift", "-e",
-                 'import Foundation; import CoreServices;'
-                 ' LSSetDefaultHandlerForURLScheme('
-                 '"zendesk-support" as CFString, "" as CFString)'],
-                capture_output=True,
-            )
-            shutil.rmtree(app_dir, ignore_errors=True)
-
-        self._cleanup_actions.append(_cleanup)
-        logger.info(f"Registered macOS URL scheme handler: {app_dir}")
+        # Don't add cleanup action - keep the handler permanently installed
+        # This allows Chrome to remember the permission for future authentications
+        logger.info(f"✓ Registered macOS URL scheme handler permanently: {app_dir}")
+        logger.info("Handler will remain installed for future authentications")
         return True
 
     # --- Linux ---
@@ -511,12 +571,17 @@ def auth_via_browser(subdomain: str, timeout: int = 300) -> dict:
 
     Used by the MCP server on startup when no valid auth is present.
     """
-    logger.info(f"No valid auth found. Starting browser authentication for {subdomain}...")
+    logger.info(f"=== Starting browser authentication for {subdomain} ===")
+    logger.info(f"Platform: {sys.platform}, Timeout: {timeout}s")
 
+    logger.info(f"Looking up auth methods for {subdomain}.zendesk.com...")
     lookup = lookup_subdomain(subdomain)
+    logger.info(f"Lookup response: {json.dumps(lookup, indent=2)}")
     agent_logins = lookup.get("agent_logins", [])
     if not agent_logins:
         raise RuntimeError(f"No login methods available for {subdomain}.zendesk.com")
+
+    logger.info(f"Available login methods: {[l.get('service') for l in agent_logins]}")
 
     # Prefer SSO > Google > Office365 > email/password (browser flow for all)
     priority = {"remote": 0, "google": 1, "office_365": 2, "zendesk": 3}
@@ -524,6 +589,8 @@ def auth_via_browser(subdomain: str, timeout: int = 300) -> dict:
 
     login = agent_logins[0]
     service = login.get("service")
+    logger.info(f"Selected auth method: {service}")
+    logger.info(f"Login config: {json.dumps(login, indent=2)}")
 
     if service == "zendesk":
         auth_url = login.get("url", f"https://{subdomain}.zendesk.com/access/oauth_mobile")
@@ -533,20 +600,35 @@ def auth_via_browser(subdomain: str, timeout: int = 300) -> dict:
     if not auth_url:
         raise RuntimeError("No authentication URL found.")
 
+    logger.info(f"Base auth URL: {auth_url}")
     full_auth_url = _build_auth_url(auth_url)
+    logger.info(f"Full auth URL: {full_auth_url}")
 
     # Start local HTTP server to receive the callback
     port = _find_free_port()
+    logger.info(f"Starting local HTTP server on port {port}")
     result = {}
 
     class AuthHandler(BaseHTTPRequestHandler):
         def do_GET(self):
+            logger.info(f"HTTP Request received: {self.path}")
             parsed = urlparse(self.path)
             if parsed.path == "/callback":
                 params = parse_qs(parsed.query)
                 callback_url = params.get("url", [""])[0]
+                logger.info(f"Callback URL received (length: {len(callback_url)})")
+                logger.info(f"Callback URL scheme: {urlparse(callback_url).scheme}")
+                logger.debug(f"Full callback URL: {callback_url}")
+
+                # Check if this is a SAML intermediate redirect (not the final OAuth callback)
+                if "SAMLRequest" in callback_url or "SAMLResponse" in callback_url:
+                    logger.warning("⚠ Received SAML intermediate redirect instead of OAuth callback")
+                    logger.warning("This indicates the SAML flow is not completing properly")
+                    logger.warning("URL contains: " + ("SAMLRequest" if "SAMLRequest" in callback_url else "SAMLResponse"))
+
                 token_data = _parse_oauth_callback(callback_url, subdomain)
                 if token_data:
+                    logger.info(f"✓ Token parsed successfully! User: {token_data.get('username')}")
                     result.update(token_data)
                     self.send_response(200)
                     self.send_header("Content-Type", "text/html")
@@ -554,6 +636,7 @@ def auth_via_browser(subdomain: str, timeout: int = 300) -> dict:
                     self.wfile.write(SUCCESS_HTML.encode())
                     threading.Thread(target=self.server.shutdown, daemon=True).start()
                 else:
+                    logger.error("✗ Failed to parse access token from callback URL")
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
                     self.end_headers()
@@ -563,6 +646,7 @@ def auth_via_browser(subdomain: str, timeout: int = 300) -> dict:
                     }).encode())
             else:
                 # Fallback page for manual paste (when URL scheme handler isn't available)
+                logger.info(f"Serving auth page at {self.path}")
                 html = AUTH_PAGE_HTML.format(auth_url=full_auth_url)
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html")
@@ -570,42 +654,81 @@ def auth_via_browser(subdomain: str, timeout: int = 300) -> dict:
                 self.wfile.write(html.encode())
 
         def log_message(self, format, *args):
+            # Still suppress default HTTP logging, we have our own
             pass
 
     server = HTTPServer(("127.0.0.1", port), AuthHandler)
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
+    logger.info("✓ HTTP server started and listening")
 
     # Try to register a URL scheme handler (macOS only)
+    logger.info(f"Attempting to register URL scheme handler for platform: {sys.platform}")
     scheme_handler = _UrlSchemeHandler(port)
     handler_registered = scheme_handler.register()
 
+    # Test the handler by triggering it once to activate Chrome's permission
+    if handler_registered and sys.platform == "darwin":
+        logger.info("Testing URL scheme handler activation...")
+        try:
+            # This will trigger Chrome to ask for permission (if needed)
+            # or establish that the handler works
+            subprocess.run(
+                ["open", "zendesk-support://test"],
+                capture_output=True,
+                timeout=2
+            )
+            logger.info("✓ URL scheme handler test triggered")
+            import time
+            time.sleep(1)  # Give macOS time to process the handler
+        except Exception as e:
+            logger.warning(f"Handler test failed: {e}")
+
     try:
         if handler_registered:
-            # Handler registered — open the auth URL directly in a private window.
-            # Using private/incognito prevents the mobile OAuth cookies from
-            # polluting the user's normal Zendesk browser session.
-            logger.info("URL scheme handler registered. Opening Zendesk login in private window.")
-            if not _open_in_private_window(full_auth_url):
-                logger.info("Private window failed, falling back to default browser.")
-                webbrowser.open(full_auth_url)
-        else:
-            # No handler — open our local page with paste instructions
-            local_url = f"http://127.0.0.1:{port}/auth"
-            logger.info(f"Opening browser for authentication: {local_url}")
-            if not _open_in_private_window(local_url):
-                webbrowser.open(local_url)
+            # Handler registered — open Chrome incognito for authentication
+            logger.info("URL scheme handler registered. Opening Chrome for authentication...")
 
+            # Use Chrome incognito (best SAML support + keeps cookies isolated)
+            chrome_opened = _open_in_private_window(full_auth_url)
+
+            if chrome_opened:
+                logger.info("✓ Chrome incognito opened")
+            else:
+                # Chrome not available - show error
+                logger.error("✗ Chrome is not installed!")
+                logger.error("Chrome is required for secure authentication (incognito mode prevents cookie pollution).")
+                logger.error("")
+                logger.error("Install Chrome:")
+                logger.error("  brew install --cask google-chrome")
+                logger.error("  Or download from: https://www.google.com/chrome/")
+                logger.error("")
+                raise RuntimeError("Chrome is required for authentication. Please install Chrome and try again.")
+        else:
+            # No handler registered (shouldn't happen on macOS, but just in case)
+            logger.warning("URL scheme handler registration failed")
+            logger.warning("Opening Chrome anyway - you may need to manually paste the callback URL")
+
+            if not _open_in_private_window(full_auth_url):
+                logger.error("Chrome not available and handler not registered")
+                raise RuntimeError("Authentication cannot proceed. Please install Chrome.")
+
+        logger.info(f"Waiting for authentication (timeout: {timeout}s)...")
         server_thread.join(timeout=timeout)
         server.server_close()
+        logger.info("HTTP server closed")
     finally:
+        logger.info("Cleaning up URL scheme handler...")
         scheme_handler.cleanup()
+        logger.info("Cleanup complete")
 
     if not result:
+        logger.error("✗ Authentication timed out - no callback received")
         raise RuntimeError(
             "Authentication timed out. Run 'zendesk-auth' manually to authenticate."
         )
 
+    logger.info(f"=== Authentication completed successfully for user: {result.get('username')} ===")
     return result
 
 
@@ -719,6 +842,22 @@ def auth_sso_browser_interactive(subdomain: str, auth_url: str) -> dict:
 def run_auth_cli():
     """Interactive CLI for authenticating with Zendesk."""
     print("=== Zendesk MCP Server - Authentication ===\n")
+
+    # Check if there's already a valid token
+    existing_token = load_token()
+    if existing_token:
+        subdomain = existing_token.get("subdomain")
+        if subdomain and verify_token(subdomain, existing_token.get("access_token")):
+            print(f"✓ Valid authentication already exists!")
+            print(f"  User: {existing_token.get('username', 'N/A')}")
+            print(f"  Subdomain: {subdomain}")
+            print(f"  Token file: {get_token_path()}")
+            print()
+            response = input("Re-authenticate anyway? [y/N]: ").strip().lower()
+            if response not in ['y', 'yes']:
+                print("\nKeeping existing authentication. Use --force to re-authenticate.")
+                return
+            print()
 
     subdomain = input("Enter your Zendesk subdomain (e.g., 'mycompany' for mycompany.zendesk.com): ").strip()
     if not subdomain:
