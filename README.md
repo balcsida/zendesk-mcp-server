@@ -248,6 +248,35 @@ The tests use mocked HTTP and never contact Zendesk. They cover the API-token an
 OAuth paths, PKCE derivation, token storage and rotation, and each of the four
 ways this server calls Zendesk.
 
+## Troubleshooting
+
+### Safari Authentication Issues (macOS)
+
+If you're using Safari and seeing errors like "Safari cannot open the page because the address is invalid" with URLs containing `SAMLRequest` or `SAMLResponse`, this is a **known issue with Safari's handling of SAML redirects**.
+
+**Solution:** The authentication system will automatically try to use Chrome first. If you don't have Chrome installed:
+
+1. Install Chrome: `brew install --cask google-chrome`
+2. Restart the MCP server to run the authentication again
+
+**Why this happens:**
+- Safari has strict security policies that prevent SAML POST requests from being completed in the OAuth mobile flow
+- The SAML identity provider tries to POST back to Zendesk, but Safari blocks this
+- Chrome and Firefox handle these SAML flows more gracefully
+
+**Alternative workaround:** If you must use Safari:
+1. Safari → Preferences → Privacy → Uncheck "Prevent cross-site tracking"
+2. Try authentication again
+3. Re-enable tracking prevention after authentication completes
+
+### Authentication Timeout
+
+If authentication times out after 5 minutes:
+
+1. Check that the URL scheme handler registered successfully (look for `URL scheme handler registered` in the server log)
+2. Try the manual fallback mode by opening `http://127.0.0.1:<port>/auth` in your browser
+3. Complete the authentication and copy/paste the `zendesk-support://` URL from the address bar
+
 ## Resources
 
 - zendesk://knowledge-base, get access to the whole help center articles.
