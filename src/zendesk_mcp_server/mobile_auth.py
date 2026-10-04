@@ -58,7 +58,7 @@ window.addEventListener('DOMContentLoaded', function() {
 </body></html>"""
 
 AUTH_PAGE_HTML = """<!DOCTYPE html>
-<html><head><title>Zendesk Auth</title>
+<html><head><meta charset="utf-8"><title>Zendesk Auth</title>
 <style>
   body {{ font-family: system-ui, sans-serif; max-width: 520px; margin: 40px auto; padding: 20px; }}
   h2 {{ color: #333; }}
