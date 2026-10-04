@@ -36,6 +36,9 @@ def markdown_to_html(text: str) -> str:
     return _MD.render(text or "")
 
 
+_ALLOWED_USER_TICKET_ROLES = {'requested', 'assigned', 'ccd'}
+
+
 class ZendeskClient:
     def __init__(
         self,
@@ -700,6 +703,10 @@ class ZendeskClient:
                          page: int = 1, per_page: int = 25) -> Dict[str, Any]:
         """Get tickets for a user. role: 'requested', 'assigned', or 'ccd'."""
         try:
+            if role not in _ALLOWED_USER_TICKET_ROLES:
+                raise ValueError(
+                    f"Invalid role '{role}'. Allowed: {sorted(_ALLOWED_USER_TICKET_ROLES)}"
+                )
             per_page = min(per_page, 100)
             params = urllib.parse.urlencode({'page': str(page), 'per_page': str(per_page)})
             data = self._api_get(f"users/{user_id}/tickets/{role}.json?{params}")
