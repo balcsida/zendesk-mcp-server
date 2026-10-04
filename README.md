@@ -173,12 +173,6 @@ OAuth fixes.
 > is for operators to have exactly their own Zendesk permissions, the
 > authorization code flow is the only one that fits.
 
-## Troubleshooting
-
-### Safari SAML Authentication Issues
-
-If you encounter issues with SAML authentication when accessing Zendesk through Safari, this is a known compatibility issue. We recommend using Chrome or another Chromium-based browser for authentication instead.
-
 ## Docker
 
 You can containerize the server if you prefer an isolated runtime:
@@ -263,7 +257,7 @@ If you're using Safari and seeing errors like "Safari cannot open the page becau
 **Solution:** The authentication system will automatically try to use Chrome first. If you don't have Chrome installed:
 
 1. Install Chrome: `brew install --cask google-chrome`
-2. Run the authentication again: `python test_auth.py`
+2. Restart the MCP server to run the authentication again
 
 **Why this happens:**
 - Safari has strict security policies that prevent SAML POST requests from being completed in the OAuth mobile flow
@@ -279,7 +273,7 @@ If you're using Safari and seeing errors like "Safari cannot open the page becau
 
 If authentication times out after 5 minutes:
 
-1. Check that the URL scheme handler registered successfully (look for `✓ URL scheme handler registered`)
+1. Check that the URL scheme handler registered successfully (look for `URL scheme handler registered` in the server log)
 2. Try the manual fallback mode by opening `http://127.0.0.1:<port>/auth` in your browser
 3. Complete the authentication and copy/paste the `zendesk-support://` URL from the address bar
 
