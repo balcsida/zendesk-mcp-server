@@ -90,3 +90,28 @@ def test_get_ticket_attachment_rejects_spoofed_magic_bytes(client):
 
     with pytest.raises(ValueError, match="does not match declared content type"):
         client.get_ticket_attachment(ATTACHMENT_URL)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://attacker.example/x.png",
+        "http://example.zendesk.com/attachments/token/abc/?name=x.png",
+        "https://other-account.zendesk.com/attachments/token/abc/?name=x.png",
+    ],
+)
+def test_get_ticket_attachment_rejects_untrusted_urls_before_any_request(client, url):
+    with responses.RequestsMock() as mock:
+        with pytest.raises(ValueError):
+            client.get_ticket_attachment(url)
+        assert len(mock.calls) == 0
+
+
+@responses.activate
+def test_get_ticket_attachment_sends_no_credentials_to_the_cdn(client):
+    cdn_url = "https://example.zdusercontent.com/attachment/abc/x.png"
+    responses.add(responses.GET, cdn_url, body=PNG_MAGIC + b"payload", content_type="image/png")
+
+    client.get_ticket_attachment(cdn_url)
+
+    assert "Authorization" not in responses.calls[0].request.headers
