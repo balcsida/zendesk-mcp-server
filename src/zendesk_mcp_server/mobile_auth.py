@@ -301,7 +301,7 @@ def _open_in_private_window(url: str) -> bool:
 
 def _parse_oauth_callback(url: str, subdomain: str) -> dict | None:
     """Parse the OAuth callback URL to extract token data."""
-    logger.info(f"Parsing OAuth callback URL...")
+    logger.info("Parsing OAuth callback URL...")
     if not url:
         logger.error("Empty callback URL")
         return None
@@ -431,7 +431,7 @@ class _UrlSchemeHandler:
             logger.info(f"AppleScript content:\n{script_content}")
         try:
             logger.info("Compiling AppleScript...")
-            result = subprocess.run(
+            subprocess.run(
                 ["osacompile", "-o", app_dir, script_file],
                 check=True, capture_output=True, text=True,
             )
@@ -462,7 +462,7 @@ class _UrlSchemeHandler:
         # Register with Launch Services (-f to force)
         logger.info("Registering with Launch Services...")
         try:
-            result = subprocess.run([lsregister, "-f", app_dir], check=True, capture_output=True, text=True)
+            subprocess.run([lsregister, "-f", app_dir], check=True, capture_output=True, text=True)
             logger.info("✓ Launch Services registration successful")
         except subprocess.CalledProcessError as e:
             logger.error(f"✗ Launch Services registration failed: {e.stderr}")
@@ -835,14 +835,14 @@ def run_auth_cli():
     if existing_token:
         subdomain = existing_token.get("subdomain")
         if subdomain and verify_token(subdomain, existing_token.get("access_token")):
-            print(f"✓ Valid authentication already exists!")
+            print("✓ Valid authentication already exists!")
             print(f"  User: {existing_token.get('username', 'N/A')}")
             print(f"  Subdomain: {subdomain}")
             print(f"  Token file: {get_token_path()}")
             print()
             response = input("Re-authenticate anyway? [y/N]: ").strip().lower()
             if response not in ['y', 'yes']:
-                print("\nKeeping existing authentication. Use --force to re-authenticate.")
+                print("\nKeeping existing authentication.")
                 return
             print()
 
