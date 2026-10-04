@@ -125,6 +125,16 @@ class ZendeskClient:
         resp = self.session.delete(f"{self.base_url}/{path}", timeout=30)
         resp.raise_for_status()
 
+    @staticmethod
+    def _serialize_custom_fields(custom_fields: Any) -> List[Dict[str, Any]]:
+        if not custom_fields:
+            return []
+        return [
+            {'id': getattr(cf, 'id', cf.get('id')), 'value': getattr(cf, 'value', cf.get('value'))}
+            if isinstance(cf, dict) else {'id': cf.id, 'value': cf.value}
+            for cf in custom_fields
+        ]
+
     def get_ticket(self, ticket_id: int) -> Dict[str, Any]:
         """
         Query a ticket by its ID
@@ -141,7 +151,10 @@ class ZendeskClient:
                 'updated_at': str(ticket.updated_at),
                 'requester_id': ticket.requester_id,
                 'assignee_id': ticket.assignee_id,
-                'organization_id': ticket.organization_id
+                'organization_id': ticket.organization_id,
+                'custom_fields': self._serialize_custom_fields(
+                    getattr(ticket, 'custom_fields', []) or []
+                ),
             }
         except Exception as e:
             raise Exception(f"Failed to get ticket {ticket_id}: {str(e)}")
@@ -328,7 +341,8 @@ class ZendeskClient:
                     'created_at': ticket.get('created_at'),
                     'updated_at': ticket.get('updated_at'),
                     'requester_id': ticket.get('requester_id'),
-                    'assignee_id': ticket.get('assignee_id')
+                    'assignee_id': ticket.get('assignee_id'),
+                    'custom_fields': ticket.get('custom_fields', []),
                 })
 
             return {
@@ -432,6 +446,9 @@ class ZendeskClient:
                 'assignee_id': getattr(created, 'assignee_id', assignee_id),
                 'organization_id': getattr(created, 'organization_id', None),
                 'tags': list(getattr(created, 'tags', tags or []) or []),
+                'custom_fields': self._serialize_custom_fields(
+                    getattr(created, 'custom_fields', []) or []
+                ),
             }
         except Exception as e:
             raise Exception(f"Failed to create ticket: {str(e)}")
@@ -471,6 +488,9 @@ class ZendeskClient:
                 'assignee_id': refreshed.assignee_id,
                 'organization_id': refreshed.organization_id,
                 'tags': list(getattr(refreshed, 'tags', []) or []),
+                'custom_fields': self._serialize_custom_fields(
+                    getattr(refreshed, 'custom_fields', []) or []
+                ),
             }
         except Exception as e:
             raise Exception(f"Failed to update ticket {ticket_id}: {str(e)}")
