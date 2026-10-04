@@ -468,10 +468,22 @@ class _UrlSchemeHandler:
             logger.error(f"✗ Launch Services registration failed: {e.stderr}")
             raise
 
-        # Don't add cleanup action - keep the handler permanently installed
-        # This allows Chrome to remember the permission for future authentications
-        logger.info(f"✓ Registered macOS URL scheme handler permanently: {app_dir}")
-        logger.info("Handler will remain installed for future authentications")
+        def _cleanup():
+            # Unregister from Launch Services
+            subprocess.run([lsregister, "-u", app_dir], capture_output=True)
+            # Also clear the default handler via CoreServices API
+            # (lsregister -u doesn't always work for URL schemes)
+            subprocess.run(
+                ["swift", "-e",
+                 'import Foundation; import CoreServices;'
+                 ' LSSetDefaultHandlerForURLScheme('
+                 '"zendesk-support" as CFString, "" as CFString)'],
+                capture_output=True,
+            )
+            shutil.rmtree(app_dir, ignore_errors=True)
+
+        self._cleanup_actions.append(_cleanup)
+        logger.info(f"✓ Registered macOS URL scheme handler: {app_dir}")
         return True
 
     # --- Linux ---
@@ -667,51 +679,26 @@ def auth_via_browser(subdomain: str, timeout: int = 300) -> dict:
     scheme_handler = _UrlSchemeHandler(port)
     handler_registered = scheme_handler.register()
 
-    # Test the handler by triggering it once to activate Chrome's permission
-    if handler_registered and sys.platform == "darwin":
-        logger.info("Testing URL scheme handler activation...")
-        try:
-            # This will trigger Chrome to ask for permission (if needed)
-            # or establish that the handler works
-            subprocess.run(
-                ["open", "zendesk-support://test"],
-                capture_output=True,
-                timeout=2
-            )
-            logger.info("✓ URL scheme handler test triggered")
-            import time
-            time.sleep(1)  # Give macOS time to process the handler
-        except Exception as e:
-            logger.warning(f"Handler test failed: {e}")
-
     try:
         if handler_registered:
-            # Handler registered — open Chrome incognito for authentication
-            logger.info("URL scheme handler registered. Opening Chrome for authentication...")
-
-            # Use Chrome incognito (best SAML support + keeps cookies isolated)
-            chrome_opened = _open_in_private_window(full_auth_url)
-
-            if chrome_opened:
-                logger.info("✓ Chrome incognito opened")
+            # Handler registered — open the auth URL directly in a private window,
+            # Chrome first for its SAML support. Private/incognito also keeps the
+            # mobile OAuth cookies out of the user's normal Zendesk browser session.
+            logger.info("URL scheme handler registered. Opening Zendesk login in a private window...")
+            if _open_in_private_window(full_auth_url):
+                logger.info("✓ Private window opened")
             else:
-                # Chrome not available - show error
-                logger.error("✗ Chrome is not installed!")
-                logger.error("Chrome is required for secure authentication (incognito mode prevents cookie pollution).")
-                logger.error("")
-                logger.error("Install Chrome:")
-                logger.error("  brew install --cask google-chrome")
-                logger.error("  Or download from: https://www.google.com/chrome/")
-                logger.error("")
-                raise RuntimeError("Chrome is required for authentication. Please install Chrome and try again.")
+                logger.warning(
+                    "Could not open a private window in Chrome, Firefox or Edge; using the default "
+                    "browser. If SAML sign-in fails in Safari, install Chrome: brew install --cask google-chrome"
+                )
+                webbrowser.open(full_auth_url)
         else:
-            # No handler registered (shouldn't happen on macOS, but just in case)
-            logger.warning("URL scheme handler registration failed")
-            logger.warning("Opening Chrome anyway - you may need to manually paste the callback URL")
-
-            if not _open_in_private_window(full_auth_url):
-                logger.error("Chrome not available and handler not registered")
-                raise RuntimeError("Authentication cannot proceed. Please install Chrome.")
+            # No handler — open our local page with paste instructions
+            local_url = f"http://127.0.0.1:{port}/auth"
+            logger.warning(f"URL scheme handler registration failed. Opening the manual sign-in page: {local_url}")
+            if not _open_in_private_window(local_url):
+                webbrowser.open(local_url)
 
         logger.info(f"Waiting for authentication (timeout: {timeout}s)...")
         server_thread.join(timeout=timeout)
