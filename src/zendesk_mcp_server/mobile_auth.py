@@ -611,14 +611,14 @@ def auth_via_browser(subdomain: str, timeout: int = 300) -> dict:
 
     class AuthHandler(BaseHTTPRequestHandler):
         def do_GET(self):
-            logger.info(f"HTTP Request received: {self.path}")
             parsed = urlparse(self.path)
+            # Path only: the query carries the callback URL and its access token.
+            logger.info(f"HTTP Request received: {parsed.path}")
             if parsed.path == "/callback":
                 params = parse_qs(parsed.query)
                 callback_url = params.get("url", [""])[0]
                 logger.info(f"Callback URL received (length: {len(callback_url)})")
                 logger.info(f"Callback URL scheme: {urlparse(callback_url).scheme}")
-                logger.debug(f"Full callback URL: {callback_url}")
 
                 # Check if this is a SAML intermediate redirect (not the final OAuth callback)
                 if "SAMLRequest" in callback_url or "SAMLResponse" in callback_url:
@@ -646,7 +646,7 @@ def auth_via_browser(subdomain: str, timeout: int = 300) -> dict:
                     }).encode())
             else:
                 # Fallback page for manual paste (when URL scheme handler isn't available)
-                logger.info(f"Serving auth page at {self.path}")
+                logger.info(f"Serving auth page at {parsed.path}")
                 html = AUTH_PAGE_HTML.format(auth_url=full_auth_url)
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html")
