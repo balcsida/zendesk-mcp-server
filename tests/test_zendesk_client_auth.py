@@ -98,6 +98,9 @@ def test_get_ticket_attachment_rejects_spoofed_magic_bytes(client):
         "https://attacker.example/x.png",
         "http://example.zendesk.com/attachments/token/abc/?name=x.png",
         "https://other-account.zendesk.com/attachments/token/abc/?name=x.png",
+        # urllib.parse reads the host as example.zendesk.com, requests connects to evil.example
+        "https://evil.example\\@example.zendesk.com/x.png",
+        "https://user:pw@example.zendesk.com/x.png",
     ],
 )
 def test_get_ticket_attachment_rejects_untrusted_urls_before_any_request(client, url):

@@ -3,6 +3,7 @@ from typing import Dict, Any, List
 import urllib.parse
 import base64
 import requests as _requests
+import urllib3
 
 from markdown_it import MarkdownIt
 from requests.adapters import HTTPAdapter
@@ -222,11 +223,18 @@ class ZendeskClient:
         is not reapplied by requests on redirect, so this still holds.
         """
         try:
-            parsed_url = urllib.parse.urlparse(content_url)
-            if parsed_url.scheme.lower() != 'https':
+            # Check the URL exactly as requests will send it. urllib.parse and urllib3
+            # read some URLs differently (a backslash before "@", for one), and checking
+            # with one parser while sending with the other lets credentials reach a
+            # host that was never checked.
+            content_url = _requests.Request('GET', content_url).prepare().url
+            parsed_url = urllib3.util.parse_url(content_url)
+            if (parsed_url.scheme or '').lower() != 'https':
                 raise ValueError("Attachment URL must use HTTPS.")
+            if parsed_url.auth:
+                raise ValueError("Attachment URL must not contain credentials.")
 
-            hostname = (parsed_url.hostname or '').lower()
+            hostname = (parsed_url.host or '').lower()
             if not hostname:
                 raise ValueError("Attachment URL must include a valid hostname.")
 
