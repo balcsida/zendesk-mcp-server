@@ -878,10 +878,7 @@ class ZendeskClient:
         Returns timing metrics like reply time, resolution time, wait times, etc.
         """
         try:
-            for metric in self.client.ticket_metrics():
-                if metric.ticket_id == ticket_id:
-                    return metric.to_dict()
-            raise Exception(f"No metrics found for ticket {ticket_id}")
+            return self._api_get(f"tickets/{int(ticket_id)}/metrics.json")['ticket_metric']
         except Exception as e:
             raise Exception(f"Failed to get metrics for ticket {ticket_id}: {str(e)}")
 
